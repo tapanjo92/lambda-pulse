@@ -1,0 +1,14 @@
+{
+  "name": "lambdapulse",
+  "private": true,
+  "workspaces": [
+    "infra",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test":  "npm run test --workspaces"
+  }
+}
+
