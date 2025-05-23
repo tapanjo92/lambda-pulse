@@ -135,13 +135,13 @@ export class InfraStack extends cdk.Stack {
 
     // 10) API Gateway with explicit routes
     const api = new apigateway.RestApi(this, 'LambdaPulseApi', {
-      restApiName: 'LambdaPulse Service',
-      defaultCorsPreflightOptions: {
-        allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: apigateway.Cors.ALL_METHODS,       // GET,POST,PUT,DELETE,OPTIONS…
-        allowHeaders: apigateway.Cors.DEFAULT_HEADERS,   // includes Content-Type,Authorization, etc.
-      },
-    });
+         restApiName: 'LambdaPulse Service',
+         defaultCorsPreflightOptions: {
+           allowOrigins: apigateway.Cors.ALL_ORIGINS,       // or:
+           // allowOrigins: ['http://localhost:3000', 'http://10.120.0.184:3000'],
+           allowMethods: apigateway.Cors.ALL_METHODS,       // GET, POST, OPTIONS, etc.
+         },
+      });
     
 
     // 10a) Root GET → processor
