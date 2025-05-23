@@ -138,9 +138,11 @@ export class InfraStack extends cdk.Stack {
       restApiName: 'LambdaPulse Service',
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: apigateway.Cors.ALL_METHODS,
+        allowMethods: apigateway.Cors.ALL_METHODS,       // GET,POST,PUT,DELETE,OPTIONS…
+        allowHeaders: apigateway.Cors.DEFAULT_HEADERS,   // includes Content-Type,Authorization, etc.
       },
     });
+    
 
     // 10a) Root GET → processor
     api.root.addMethod('GET', new apigateway.LambdaIntegration(processor));
@@ -158,4 +160,3 @@ export class InfraStack extends cdk.Stack {
     });
   }
 }
-
