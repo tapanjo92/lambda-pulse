@@ -5,6 +5,9 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as timestream from 'aws-cdk-lib/aws-timestream';
 import * as firehose from 'aws-cdk-lib/aws-kinesisfirehose';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as path from 'path';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 
 export class InfraStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -43,6 +46,23 @@ export class InfraStack extends cdk.Stack {
         roleArn:   firehoseRole.roleArn,
       },
     });
+
+    const processor = new lambda.Function(this, 'ProcessorFunction', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/dist')),
+    });
+
+    const api = new apigateway.LambdaRestApi(this, 'LambdaPulseApi', {
+      handler: processor,
+      proxy: true,             // routes ANY / to your Lambda
+    });
+    
+    new cdk.CfnOutput(this, 'ApiUrl', {
+      value: api.url,          // e.g. https://xxxx.execute-api...
+      description: 'Invoke URL for LambdaPulse API',
+    });
+    
   }
 }
 
