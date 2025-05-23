@@ -22,18 +22,18 @@ export class InfraStack extends cdk.Stack {
 
     // 2) DynamoDB table for parsed metrics
     const metricsTable = new dynamodb.Table(this, 'MetricsTable', {
-          partitionKey: { name: 'tickerSymbol', type: dynamodb.AttributeType.STRING },
-          sortKey:      { name: 'timestamp',    type: dynamodb.AttributeType.STRING },
-          billingMode:  dynamodb.BillingMode.PAY_PER_REQUEST,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-      });
+      partitionKey: { name: 'tickerSymbol', type: dynamodb.AttributeType.STRING },
+      sortKey:      { name: 'timestamp',    type: dynamodb.AttributeType.STRING },
+      billingMode:  dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
-    // 3) Timestream database for time-series data
+    // 3) Timestream database
     const tsDatabase = new timestream.CfnDatabase(this, 'TimestreamDB', {
       databaseName: 'LambdaPulseDB',
     });
 
-    // 4) Timestream table for metrics
+    // 4) Timestream table
     const tsTable = new timestream.CfnTable(this, 'TimestreamTable', {
       databaseName: tsDatabase.ref,
       tableName: 'LambdaPulseMetrics',
@@ -42,7 +42,7 @@ export class InfraStack extends cdk.Stack {
         MagneticStoreRetentionPeriodInDays: '7',
       },
     });
-    tsTable.addDependsOn(tsDatabase); // ensure DB exists first
+    tsTable.addDependency(tsDatabase);
 
     // 5) ETL Lambda: processes incoming Firehose records
     const etlLambda = new lambda.Function(this, 'EtlFunction', {
@@ -53,26 +53,27 @@ export class InfraStack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/dist')),
       environment: {
         METRICS_TABLE: metricsTable.tableName,
-        TS_DATABASE: tsDatabase.ref,
-        TS_TABLE: 'LambdaPulseMetrics',
+        TS_DATABASE:   tsDatabase.ref,
+        TS_TABLE:      tsTable.tableName!,
       },
     });
 
-    // Grant ETL Lambda write permissions
+    // Permissions for ETL Lambda
     metricsTable.grantWriteData(etlLambda);
     etlLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['timestream:WriteRecords'],
       resources: [
-        cdk.Arn.format({
-          service: 'timestream',
-          resource: 'database',
-          arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
-          resourceName: `${tsDatabase.ref}/table/LambdaPulseMetrics`,
-        }, this),
+        `arn:${cdk.Aws.PARTITION}:timestream:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+        `:database/${tsDatabase.ref}/table/${tsTable.tableName}`
       ],
     }));
+    etlLambda.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['timestream:DescribeEndpoints'],
+      resources: ['*'],
+    }));
 
-    // 6) IAM Role for Firehose (to write to S3 and invoke Lambda)
+    // 6) IAM Role for Firehose (to write to S3 & invoke Lambda)
     const firehoseRole = new iam.Role(this, 'FirehoseRole', {
       assumedBy: new iam.ServicePrincipal('firehose.amazonaws.com'),
     });
@@ -85,10 +86,7 @@ export class InfraStack extends cdk.Stack {
       extendedS3DestinationConfiguration: {
         bucketArn: rawLogsBucket.bucketArn,
         roleArn:   firehoseRole.roleArn,
-        bufferingHints: {
-          intervalInSeconds: 60,
-          sizeInMBs: 5,
-        },
+        bufferingHints: { intervalInSeconds: 60, sizeInMBs: 5 },
         processingConfiguration: {
           enabled: true,
           processors: [{
@@ -102,23 +100,62 @@ export class InfraStack extends cdk.Stack {
       },
     });
 
-    // 8) Primary processor Lambda (e.g., API handler)
+    // 8) Primary processor Lambda (root GET / health-check)
     const processor = new lambda.Function(this, 'ProcessorFunction', {
       runtime: lambda.Runtime.NODEJS_18_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/dist')),
     });
 
-    // 9) API Gateway REST API fronting the processor Lambda
-    const api = new apigateway.LambdaRestApi(this, 'LambdaPulseApi', {
-      handler: processor,
-      proxy: true,
+    // 9) Query-Latest Lambda (for /metrics/latest)
+    const queryLatestLambda = new lambda.Function(this, 'QueryLatestFunction', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: 'query-latest.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/dist')),
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        TS_DATABASE: tsDatabase.ref,
+        TS_TABLE:    tsTable.tableName!,
+      },
     });
 
-    // Output the API URL
+    // Permissions for QueryLatestFunction
+    queryLatestLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['timestream:Select'],
+      resources: [
+        `arn:${cdk.Aws.PARTITION}:timestream:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+        `:database/${tsDatabase.ref}/table/${tsTable.tableName}`
+      ],
+    }));
+    queryLatestLambda.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['timestream:DescribeEndpoints'],
+      resources: ['*'],
+    }));
+
+    // 10) API Gateway with explicit routes
+    const api = new apigateway.RestApi(this, 'LambdaPulseApi', {
+      restApiName: 'LambdaPulse Service',
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigateway.Cors.ALL_ORIGINS,
+        allowMethods: apigateway.Cors.ALL_METHODS,
+      },
+    });
+
+    // 10a) Root GET → processor
+    api.root.addMethod('GET', new apigateway.LambdaIntegration(processor));
+
+    // 10b) /metrics/latest → queryLatestLambda
+    const metrics = api.root.addResource('metrics');
+    metrics
+      .addResource('latest')
+      .addMethod('GET', new apigateway.LambdaIntegration(queryLatestLambda));
+
+    // 11) Output the Base API URL
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: api.url,
-      description: 'Invoke URL for the LambdaPulse API',
+      description: 'Base URL of the LambdaPulse API',
     });
   }
 }
+
